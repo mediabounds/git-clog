@@ -122,7 +122,11 @@ guess_space_url(){
 
 # The default range of commits will be changes since
 # GIT_PREVIOUS_SUCCESSFUL_COMMIT or the most recent tag.
-default_range=${GIT_PREVIOUS_SUCCESSFUL_COMMIT:=$(git describe --abbrev=0 --tags)}..HEAD
+recent_tag=$(git describe --abbrev=0 --tags 2>/dev/null) || true
+default_range_start=${GIT_PREVIOUS_SUCCESSFUL_COMMIT:-$recent_tag}
+if [ -n "$default_range_start" ]; then
+  default_range=$default_range_start..HEAD
+fi
 range=${1:-$default_range}
 space_url=${ASSEMBLA_SPACE_URL:-$(guess_space_url)}
 
