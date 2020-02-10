@@ -1,0 +1,217 @@
+#!/bin/bash
+set -e
+
+print_usage() {
+  cat << EOM
+Usage: $(basename $0) [options] [revision-range]
+
+Outputs a summarized list of changes in the revision-range.
+
+Optimized for retrieving Assembla-specific information from git logs
+such as ticket or merge request URLs. Also formats squashed merge commits
+so that the title of the merge request is used as the changelog.
+
+Options
+  -o <format>             The output format (default=changes).
+  -v                      Enables verbose output.
+  -h                      Displays this message.
+
+Output formats
+  commits                 Hash identifiers for the commits.
+  changes                 Log of the changes.
+  tickets,ticket          Referenced Assembla ticket numbers.
+  ticket_urls,urls        URLs to the referenced tickets.
+  merge_requests,mr       URLs to the merge requests.
+
+Examples
+  Prints a list of changes since the last tag:
+
+    $(basename $0)
+
+  Prints a list of tickets impacted between bug/1234 and master:
+
+    $(basename $0) -o tickets bug/1234..master
+  
+  Prints URLs of tickets impacted between two specific commits:
+
+    $(basename $0) -o urls 90bb49b..be98809
+
+Environment variables
+  GIT_PREVIOUS_SUCCESSFUL_COMMIT
+    If revision-range is not specified, the range will default to changes since
+    this value (this is populated automatically by Jenkins). If empty,
+    the range will default to changes since the most recent tag.
+  
+  ASSEMBLA_SPACE_URL
+    The base Assembla space URL. If empty, this will attempted to be
+    derived based on the git remote URL.
+
+See also
+  Selecting a range of revisions
+    https://git-scm.com/book/en/v2/Git-Tools-Revision-Selection
+
+Authors
+  Daniel Pfeiffer, Float (https://gowithfloat.com)
+EOM
+}
+
+abort() {
+  >&2 echo "$(tput setaf 1)$1$(tput sgr0)"
+  >&2 echo ""
+  print_usage 1>&2
+  exit 1
+}
+
+output="changes"
+
+while getopts ":o:hv" opt; do
+  case ${opt} in
+    o)
+      output=$OPTARG
+      ;;
+    v)
+      verbose=true
+      ;;
+    h)
+      print_usage
+      exit 0
+      ;;
+    \?)
+      abort "Invalid option: -$OPTARG"
+      ;;
+    :)
+      abort "-$OPTARG requires an argument"
+      ;;
+  esac
+done
+shift $((OPTIND -1))
+
+info() {
+  if [ $verbose ]; then
+    >&2 echo "$(tput setaf 3)$1$(tput sgr0)"
+  fi
+}
+
+guess_space_url(){
+  info "Guessing at space URL based on git remote"
+
+  #
+  # The Assembla space URL can _probably_ be guessed from the git remote.
+  # The git remote will include the space name and could appear in one
+  # of the following formats:
+  #
+  #   git@git.assembla.com:portflio/space-name.label.git
+  #   git@git.assembla.com:space-name.label.git
+  #
+  remote=$(git remote -v | grep fetch | awk '{print $2}')
+  repo=${remote##*[:/]}
+  space=${repo%%.*}
+
+  if [ -z $space ]; then
+    info "Failed to determine Assembla space from remote: ${remote}"
+    exit 1
+  fi
+
+  space_url="https://app.assembla.com/spaces/${space}"
+
+  info "git repo: ${repo}"
+  info "Resolved Assembla space URL: ${space_url}"
+  
+  echo "$space_url"
+}
+
+# The default range of commits will be changes since
+# GIT_PREVIOUS_SUCCESSFUL_COMMIT or the most recent tag.
+default_range=${GIT_PREVIOUS_SUCCESSFUL_COMMIT:=$(git describe --abbrev=0 --tags)}..HEAD
+range=${1:-$default_range}
+space_url=${ASSEMBLA_SPACE_URL:-$(guess_space_url)}
+
+get_commits(){
+  # List hashes in reverse order (oldest first) and skips over merge commits.
+  git log $range --pretty=format:'%H' --reverse --no-merges
+}
+
+# When assembla squashes a merge, the commit messages look like the following.
+# To make the list of changes useful, the log message for squash merge commits
+# should come from the first line of the body instead of the summary.
+#
+# Example:
+#
+#   Merge branch 'bug/various' into 'master'
+# 
+#   Avoids handling “double navigation” (re #1708)
+#
+#   done #1707, #1708
+#
+#   +1: John Doe
+#
+#   Merged-on: https://assembla.com/code/space-name/git/merge_requests/1234567
+#
+get_change(){
+  if is_merge_commit $1; then
+    info "[$1] Using first line of body"
+    git show --quiet $1 --pretty=format:'%b' | head -n 1
+  else
+    info "[$1] Using summary"
+    git show --quiet $1 --pretty=format:'%s'
+  fi
+}
+
+is_merge_commit(){
+  # Assembla includes the string "Merged-on" when it creates a merge commit.
+  # A merge commit is created when a merge request is squashed before merging.
+  if [[ $(git show --quiet $1) == *"Merged-on"* ]]; then
+    return 0
+  fi
+
+  return 1
+}
+
+get_mr_url(){
+  git show --quiet $1 | grep "Merged-on" | sed 's/.*Merged-on: \(.*\)/\1/'
+}
+
+get_tickets(){
+  for string in $(git show --quiet $1)
+  do
+    if [[ $string =~ \#[0-9]+ ]]; then
+      echo "${BASH_REMATCH[0]}"
+    fi
+  done
+}
+
+get_ticket_url(){
+  while read ticket
+  do
+    if [ -n "$space_url" ]; then
+      echo "${space_url}/tickets/${ticket/\#/}"
+    else
+      echo $ticket
+    fi
+  done
+}
+
+info "Outputting $range as $output..."
+
+for commit in $(get_commits); do
+  case ${output} in
+    commits)
+      echo $commit
+      ;;
+    changes)
+      get_change $commit
+      ;;
+    ticket|tickets)
+      get_tickets $commit | sort -u
+      ;;
+    urls|ticket_urls)
+      get_tickets $commit | get_ticket_url | sort -u
+      ;;
+    mr|pr|merge_requests)
+      get_mr_url $commit
+      ;;
+    *)
+      error "Invalid output format: $output"
+      ;;
+  esac
+done
