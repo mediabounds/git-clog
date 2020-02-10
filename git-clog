@@ -157,7 +157,7 @@ get_change(){
     git show --quiet $1 --pretty=format:'%b' | head -n 1
   else
     info "[$1] Using summary"
-    git show --quiet $1 --pretty=format:'%s'
+    git show --quiet $1 --pretty=format:'%s%n'
   fi
 }
 
